@@ -6,7 +6,6 @@ import os
 import time
 from pathlib import Path
 import chromadb
-import requests
 import json
 import PyPDF2
 import docx
@@ -22,8 +21,9 @@ import openai
 st.set_page_config(page_title="SimpleRAG", page_icon="💬", layout="wide")
 
 # Constants for initiating the interface
-DEFAULT_OLLAMA_URL = 'http://localhost:11434'
 DEFAULT_OPENAI_MODEL = "text-embedding-3-small"
+DEFAULT_CHAT_MODELS = ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo"]
+DEFAULT_CHAT_MODEL = DEFAULT_CHAT_MODELS[0]  # Set the default to the first model in the list
 DEFAULT_CHUNK_SIZE = 4000  # the number of characters in each chunk 
 DEFAULT_CHUNK_OVERLAP = 2000  # the number of overlapping characters between two concecutive chunks
 DEFAULT_NUM_CHUNKS = 4 # the number of chunks that are added to the chat context
@@ -45,47 +45,6 @@ User Question: {question}
 Please provide a comprehensive answer to the user's question based on the given context, document summaries, and chat history. If the information is not available in the provided context, please state that you don't have enough information to answer the question.
 
 Your Answer:"""
-
-# Ollama API functions
-def check_ollama_connection(ollama_url: str) -> bool:
-    """
-    Check if the Ollama server is accessible and responding.
-
-    Args:
-        ollama_url (str): The URL of the Ollama server.
-
-    Returns:
-        bool: True if the connection is successful, False otherwise.
-
-    Note:
-        This function uses a GET request to the '/api/tags' endpoint with a 5-second timeout.
-    """
-    try:
-        requests.get(f'{ollama_url}/api/tags', timeout=5).raise_for_status()
-        return True
-    except requests.RequestException:
-        return False
-
-def get_ollama_models(ollama_url: str) -> List[str]:
-    """
-    Retrieve a list of available models from the Ollama server.
-
-    Args:
-        ollama_url (str): The URL of the Ollama server.
-
-    Returns:
-        List[str]: A list of model names available on the server.
-
-    Note:
-        If there's an error connecting to the server, it will be displayed in the Streamlit sidebar.
-    """
-    try:
-        response = requests.get(f'{ollama_url}/api/tags', timeout=5)
-        response.raise_for_status()
-        return [model['name'] for model in response.json()['models']]
-    except requests.RequestException as e:
-        st.sidebar.error(f"Error connecting to Ollama: {str(e)}")
-        return []
 
 def embed_documents(api_key: str, texts: List[str]) -> Union[List[List[float]], None]:
     """
@@ -114,32 +73,32 @@ def embed_documents(api_key: str, texts: List[str]) -> Union[List[List[float]], 
         st.sidebar.error(f"Error getting embedding: {str(e)}")
         return None
 
-def chat_with_documents(ollama_url: str, model: str, prompt: str, temperature: float):
+def chat_with_openai(api_key: str, model: str, prompt: str, temperature: float) -> str:
     """
-    Generate a response from the Ollama model based on the given prompt.
+    Generate a response from the OpenAI model based on the given prompt.
 
     Args:
-        ollama_url (str): The URL of the Ollama server.
+        api_key (str): The OpenAI API key.
         model (str): The name of the chat model to use.
         prompt (str): The input prompt for the model.
         temperature (float): The temperature parameter for controlling randomness in the output.
 
     Returns:
-        requests.Response or None: A streaming response object if successful, None if there's an error.
+        str: The generated response from the model.
 
     Note:
-        This function uses the '/api/generate' endpoint and returns a streaming response.
+        This function uses OpenAI's ChatCompletion API.
         Errors are displayed in the Streamlit sidebar.
     """
+    openai.api_key = api_key
     try:
-        response = requests.post(
-            f'{ollama_url}/api/generate',
-            json={'model': model, 'prompt': prompt, 'temperature': temperature},
-            stream=True
+        response = openai.ChatCompletion.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=temperature
         )
-        response.raise_for_status()
-        return response
-    except requests.RequestException as e:
+        return response.choices[0].message.content
+    except Exception as e:
         st.sidebar.error(f"Error generating response: {str(e)}")
         return None
 
@@ -223,12 +182,12 @@ def chunk_text(text: str, chunk_size: int, chunk_overlap: int) -> List[str]:
         start += chunk_size - chunk_overlap
     return chunks
 
-def summarize_document(ollama_url: str, model: str, text: str) -> str:
+def summarize_document(api_key: str, model: str, text: str) -> str:
     """
-    Generate a concise summary of a given document using the Ollama model.
+    Generate a concise summary of a given document using the OpenAI model.
 
     Args:
-        ollama_url (str): The URL of the Ollama server.
+        api_key (str): The OpenAI API key.
         model (str): The name of the model to use for summarization.
         text (str): The document text to summarize.
 
@@ -240,20 +199,18 @@ def summarize_document(ollama_url: str, model: str, text: str) -> str:
         a temperature of 0.1 for more deterministic outputs.
     """
     prompt = f"Please provide a concise summary of the following document:\n\n{text}\n\nSummary:"
-    response = chat_with_documents(ollama_url, model, prompt, 0.1)
+    response = chat_with_openai(api_key, model, prompt, 0.1)
     if response:
-        summary = "".join([json.loads(line)['response'] for line in response.iter_lines() if line])
-        return summary
+        return response
     return "Failed to generate summary."
 
-def process_documents(api_key: str, ollama_url: str, chat_model: str, files: List[io.BytesIO], chunk_size: int, chunk_overlap: int) -> List[Dict[str, Union[str, Dict[str, Union[str, int]]]]]:
+def process_documents(api_key: str, chat_model: str, files: List[io.BytesIO], chunk_size: int, chunk_overlap: int) -> List[Dict[str, Union[str, Dict[str, Union[str, int]]]]]:
     """
     Process a list of document files, extracting content, generating summaries, and chunking text.
 
     Args:
-        api_key (str): The OpenAI API key for embeddings.
-        ollama_url (str): The URL of the Ollama server for summarization.
-        chat_model (str): The name of the Ollama model to use for summarization.
+        api_key (str): The OpenAI API key for embeddings and summarization.
+        chat_model (str): The name of the OpenAI model to use for summarization.
         files (List[io.BytesIO]): A list of file-like objects containing the documents.
         chunk_size (int): The maximum size of each text chunk.
         chunk_overlap (int): The number of characters to overlap between chunks.
@@ -271,7 +228,7 @@ def process_documents(api_key: str, ollama_url: str, chat_model: str, files: Lis
     for file in files:
         content = read_file(file, file.name)
         if content:
-            summary = summarize_document(ollama_url, chat_model, content)
+            summary = summarize_document(api_key, chat_model, content)
             summaries[file.name] = summary
             chunks = chunk_text(content, chunk_size, chunk_overlap)
             for i, chunk in enumerate(chunks):
@@ -393,14 +350,12 @@ def main():
     2. Sets up the sidebar with various settings and file upload functionality
     3. Handles document processing and indexing
     4. Manages the chat interface, including displaying messages and handling user input
-    5. Performs hybrid search on user queries and generates responses using the Ollama model
+    5. Performs hybrid search on user queries and generates responses using the OpenAI model
 
     Note:
         This function serves as the entry point for the Streamlit application and
         orchestrates the entire SimpleRAG experience.
     """
-    if 'ollama_url' not in st.session_state:
-        st.session_state.ollama_url = DEFAULT_OLLAMA_URL
     if 'messages' not in st.session_state:
         st.session_state.messages = []
     if 'collection' not in st.session_state:
@@ -417,26 +372,21 @@ def main():
         st.header("Settings")
         
         with st.expander("🤖 Model Settings", expanded=False):
-            ollama_url = st.text_input("Ollama Server URL:", value=st.session_state.ollama_url, key="ollama_url_input")
-            if ollama_url != st.session_state.ollama_url:
-                st.session_state.ollama_url = ollama_url
-
             openai_api_key = st.text_input("OpenAI API Key:", type="password", key="openai_api_key_input")
             st.session_state.openai_api_key = openai_api_key
 
-            if not check_ollama_connection(st.session_state.ollama_url):
-                st.error(f"Cannot connect to Ollama server at {st.session_state.ollama_url}. Please make sure it's running.")
-            else:
-                models = get_ollama_models(st.session_state.ollama_url)
-                if not models:
-                    st.error("No Ollama models available. Please check your Ollama installation.")
-                else:
-                    st.write(f"Using OpenAI embedding model: {DEFAULT_OPENAI_MODEL}")
-                    
-                    chat_models = models
-                    selected_chat_model = st.selectbox("Select the chat model", chat_models, key="chat_model_select")
-                    
-                    temperature = st.slider("Temperature", min_value=0.0, max_value=1.0, value=DEFAULT_TEMPERATURE, step=0.1, key="temperature_slider")
+            st.write(f"Using OpenAI embedding model: {DEFAULT_OPENAI_MODEL}")
+            
+            # Add a selectbox for choosing the chat model
+            selected_chat_model = st.selectbox(
+                "Select OpenAI Chat Model:",
+                options=DEFAULT_CHAT_MODELS,
+                index=0,
+                key="chat_model_selectbox"
+            )
+            st.session_state.selected_chat_model = selected_chat_model
+            
+            temperature = st.slider("Temperature", min_value=0.0, max_value=1.0, value=DEFAULT_TEMPERATURE, step=0.1, key="temperature_slider")
 
         with st.expander("📄 Process Settings", expanded=False):
             chunk_size = st.number_input("Chunk size", min_value=100, max_value=4000, value=DEFAULT_CHUNK_SIZE, key="chunk_size_input")
@@ -468,7 +418,7 @@ def main():
 
                     # Process uploaded documents
                     status_text.text("Reading and chunking documents...")
-                    documents, summaries = process_documents(openai_api_key, st.session_state.ollama_url, selected_chat_model, uploaded_files, chunk_size, chunk_overlap)
+                    documents, summaries = process_documents(openai_api_key, DEFAULT_CHAT_MODEL, uploaded_files, chunk_size, chunk_overlap)
                     progress_bar.progress(25)
                     
                     # Display processed files
@@ -555,24 +505,12 @@ def main():
                         chat_history = get_chat_history(st.session_state.messages, memory_size)
                         full_prompt = prompt_template.format(context=context, summaries=summaries_text, memory=chat_history, question=prompt)
                         
-                        # Generate response using the chat model
-                        response = chat_with_documents(st.session_state.ollama_url, selected_chat_model, full_prompt, temperature)
+                        # Generate response using the selected OpenAI chat model
+                        response = chat_with_openai(st.session_state.openai_api_key, st.session_state.selected_chat_model, full_prompt, temperature)
                         
                         if response:
-                            # Stream the response
-                            full_response = ""
-                            message_placeholder = st.empty()
-                            for line in response.iter_lines():
-                                if line:
-                                    try:
-                                        json_response = json.loads(line)
-                                        if 'response' in json_response:
-                                            full_response += json_response['response']
-                                            message_placeholder.markdown(full_response + "▌")
-                                    except json.JSONDecodeError:
-                                        continue
-                            message_placeholder.markdown(full_response)
-                            st.session_state.messages.append({"role": "assistant", "content": full_response})
+                            st.markdown(response)
+                            st.session_state.messages.append({"role": "assistant", "content": response})
 
                             # Display used chunks in an expander
                             with st.expander("📚 View Relevant Document Chunks", expanded=False):
@@ -586,7 +524,7 @@ def main():
             else:
                 st.error("Please process some documents first.")
     else:
-        st.info("💡 Please enter your OpenAI API key, select a chat model, and then upload and process documents to start chatting.")
+        st.info("💡 Please enter your OpenAI API key and then upload and process documents to start chatting.")
 
 if __name__ == "__main__":
     main()
