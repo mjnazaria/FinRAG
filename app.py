@@ -21,9 +21,8 @@ import openai
 st.set_page_config(page_title="SimpleRAG", page_icon="💬", layout="wide")
 
 # Constants for initiating the interface
-DEFAULT_OPENAI_MODEL = "text-embedding-3-small"
-DEFAULT_CHAT_MODELS = ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo"]
-DEFAULT_CHAT_MODEL = DEFAULT_CHAT_MODELS[0]  # Set the default to the first model in the list
+EMBEDDING_MODELS = ["text-embedding-3-small", "text-embedding-3-large", "text-embedding-ada-002"]
+CHAT_MODELS = ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo"]
 DEFAULT_CHUNK_SIZE = 4000  # the number of characters in each chunk 
 DEFAULT_CHUNK_OVERLAP = 2000  # the number of overlapping characters between two concecutive chunks
 DEFAULT_NUM_CHUNKS = 4 # the number of chunks that are added to the chat context
@@ -46,26 +45,27 @@ Please provide a comprehensive answer to the user's question based on the given 
 
 Your Answer:"""
 
-def embed_documents(api_key: str, texts: List[str]) -> Union[List[List[float]], None]:
+def embed_documents(api_key: str, texts: List[str], model: str) -> Union[List[List[float]], None]:
     """
     Generate embeddings for a list of text documents using OpenAI's API.
 
     Args:
         api_key (str): The OpenAI API key.
         texts (List[str]): A list of text documents to embed.
+        model (str): The name of the embedding model to use.
 
     Returns:
         Union[List[List[float]], None]: A list of embeddings (each embedding is a list of floats),
                                         or None if there's an error.
 
     Note:
-        This function uses OpenAI's text-embedding-3-small model.
+        This function uses the specified OpenAI embedding model.
         Errors are displayed in the Streamlit sidebar.
     """
     openai.api_key = api_key
     try:
         response = openai.Embedding.create(
-            model=DEFAULT_OPENAI_MODEL,
+            model=model,
             input=texts
         )
         return [data.embedding for data in response.data]
@@ -305,7 +305,7 @@ def hybrid_search(query: str, collection, documents: List[Dict[str, Union[str, D
         with traditional keyword-based search for more robust results.
     """
     # Semantic search
-    question_embedding = embed_documents(st.session_state.openai_api_key, [query])
+    question_embedding = embed_documents(st.session_state.openai_api_key, [query], st.session_state.selected_embedding_model)
     semantic_results = collection.query(
         query_embeddings=question_embedding,
         n_results=num_chunks
@@ -317,7 +317,7 @@ def hybrid_search(query: str, collection, documents: List[Dict[str, Union[str, D
     # Combine results
     combined_results = []
     for i, (semantic_doc, keyword_score) in enumerate(zip(semantic_results['documents'][0], keyword_scores)):
-        combined_score = (semantic_results['distances'][0][i] + keyword_score) / 2  # Simple average of both scores
+        combined_score = 0.8*semantic_results['distances'][0][i] + 0.2*keyword_score  # weighted average of two scores
         combined_results.append((semantic_doc, semantic_results['metadatas'][0][i], combined_score))
 
     # Sort by combined score (lower is better)
@@ -375,12 +375,19 @@ def main():
             openai_api_key = st.text_input("OpenAI API Key:", type="password", key="openai_api_key_input")
             st.session_state.openai_api_key = openai_api_key
 
-            st.write(f"Using OpenAI embedding model: {DEFAULT_OPENAI_MODEL}")
-            
+            # Add a selectbox for choosing the embedding model
+            selected_embedding_model = st.selectbox(
+                "Select OpenAI Embedding Model:",
+                options=EMBEDDING_MODELS,
+                index=0,
+                key="embedding_model_selectbox"
+            )
+            st.session_state.selected_embedding_model = selected_embedding_model
+
             # Add a selectbox for choosing the chat model
             selected_chat_model = st.selectbox(
                 "Select OpenAI Chat Model:",
-                options=DEFAULT_CHAT_MODELS,
+                options=CHAT_MODELS,
                 index=0,
                 key="chat_model_selectbox"
             )
@@ -418,7 +425,7 @@ def main():
 
                     # Process uploaded documents
                     status_text.text("Reading and chunking documents...")
-                    documents, summaries = process_documents(openai_api_key, DEFAULT_CHAT_MODEL, uploaded_files, chunk_size, chunk_overlap)
+                    documents, summaries = process_documents(openai_api_key, st.session_state.selected_chat_model, uploaded_files, chunk_size, chunk_overlap)
                     progress_bar.progress(25)
                     
                     # Display processed files
@@ -428,7 +435,7 @@ def main():
                     
                     # Embed documents
                     status_text.text("Generating embeddings...")
-                    embeddings = embed_documents(openai_api_key, [doc["content"] for doc in documents])
+                    embeddings = embed_documents(openai_api_key, [doc["content"] for doc in documents], st.session_state.selected_embedding_model)
                     progress_bar.progress(50)
                     
                     if embeddings:
@@ -438,7 +445,7 @@ def main():
                         progress_bar.progress(75)
                         
                         # Create a new collection with a sanitized name based on the embedding model
-                        base_name = f"document_collection_{DEFAULT_OPENAI_MODEL}"
+                        base_name = f"document_collection_{st.session_state.selected_embedding_model}"
                         collection_name = sanitize_collection_name(base_name)
                         
                         # Delete existing collection if it exists
