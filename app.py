@@ -1,5 +1,8 @@
 # This application is developed by Neo Mohsenvand, starting on Sep 3 2024. Claude Sonnet 3.5 was used to optimize the code. 
 
+
+
+
 import streamlit as st
 from streamlit_chat import message
 import os
@@ -16,21 +19,23 @@ import io
 from collections import Counter
 import re
 import openai
+import pandas as pd
+import csv
 
 # Set page config at the very beginning
-st.set_page_config(page_title="SimpleRAG", page_icon="💬", layout="wide")
+st.set_page_config(page_title="FinRAG", page_icon="💬", layout="wide")
 
 # Constants for initiating the interface
 EMBEDDING_MODELS = ["text-embedding-3-small", "text-embedding-3-large", "text-embedding-ada-002"]
 CHAT_MODELS = ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo"]
-DEFAULT_CHUNK_SIZE = 4000  # the number of characters in each chunk 
-DEFAULT_CHUNK_OVERLAP = 2000  # the number of overlapping characters between two concecutive chunks
-DEFAULT_NUM_CHUNKS = 4 # the number of chunks that are added to the chat context
+DEFAULT_CHUNK_SIZE = 2000  # the number of characters in each chunk 
+DEFAULT_CHUNK_OVERLAP = 1000  # the number of overlapping characters between two concecutive chunks
+DEFAULT_NUM_CHUNKS = 3 # the number of chunks that are added to the chat context
 DEFAULT_TEMPERATURE = 0.1 # the degree of model creativity (less = more strict)
 DEFAULT_MEMORY_SIZE = 3 # the number of recent Q&A pairs to keep in memory and add to the chat context
 
 # Default prompt template for the chat model. 
-DEFAULT_PROMPT_TEMPLATE = """Here are the chunks retrieved based on similarity search from user's question. They might or might not be directly related to the question:
+DEFAULT_PROMPT_TEMPLATE = """Here are the chunks retrieved based on similarity search from user's question:
 {context}
 
 Document Summaries:
@@ -39,9 +44,10 @@ Document Summaries:
 Chat History:
 {memory}
 
+
 User Question: {question}
 
-Please provide a comprehensive answer to the user's question based on the given context, document summaries, and chat history. If the information is not available in the provided context, please state that you don't have enough information to answer the question.
+Please provide an answer to the user's question based on the given context, document summaries, and chat history. If the information is not available in the provided context, please return N/A.
 
 Your Answer:"""
 
@@ -119,7 +125,6 @@ def detect_encoding(file_content: bytes) -> str:
     return chardet.detect(file_content)['encoding']
 
 def read_file(file: io.BytesIO, filename: str) -> str:
-    _, file_extension = os.path.splitext(filename)
     """
     Read and extract text content from various file types.
 
@@ -135,6 +140,8 @@ def read_file(file: io.BytesIO, filename: str) -> str:
         For unsupported file types, it attempts to read them as text files.
         Errors during file reading are displayed in the Streamlit sidebar.
     """
+    _, file_extension = os.path.splitext(filename)
+
     try:
         if file_extension.lower() == '.pdf':
             pdf_reader = PyPDF2.PdfReader(file)
@@ -144,9 +151,14 @@ def read_file(file: io.BytesIO, filename: str) -> str:
             doc = docx.Document(file)
             return ' '.join([para.text for para in doc.paragraphs])
         
-        elif file_extension.lower() in ['.xlsx', '.xls']:
+        elif file_extension.lower() in ['.xlsx', '.xls', '.csv']:
             workbook = openpyxl.load_workbook(file)
-            return ' '.join([str(cell.value) for sheet in workbook.worksheets for row in sheet.iter_rows() for cell in row if cell.value])
+            # return ' '.join([str(cell.value) for sheet in workbook.worksheets for row in sheet.iter_rows() for cell in row if cell.value])
+            sheet = workbook.active       
+            data = sheet.values
+            columns = next(data)
+            df = pd.DataFrame(data, columns=columns)           
+            return df 
         
         else:  # Assume it's a text file
             content = file.read()
@@ -214,7 +226,7 @@ def process_documents(api_key: str, chat_model: str, files: List[io.BytesIO], ch
         files (List[io.BytesIO]): A list of file-like objects containing the documents.
         chunk_size (int): The maximum size of each text chunk.
         chunk_overlap (int): The number of characters to overlap between chunks.
-
+ 
     Returns:
         Tuple[List[Dict], Dict]: A tuple containing:
             - A list of dictionaries, each representing a document chunk with its metadata.
@@ -241,6 +253,78 @@ def process_documents(api_key: str, chat_model: str, files: List[io.BytesIO], ch
                     }
                 })
     return documents, summaries
+
+
+
+# def process_questions(api_key: str, chat_model: str, file: io.BytesIO) -> str:
+#     """
+#     Process a list of document files, extracting content, generating summaries, and chunking text.
+
+#     Args:
+#         api_key (str): The OpenAI API key for embeddings and summarization.
+#         chat_model (str): The name of the OpenAI model to use for summarization.
+#         files (io.BytesIO): A file-like objects containing the documents.
+
+#     Returns:
+#             - A dictionary of document summaries, keyed by filename.
+
+#         Note:
+#             This function uses a fixed prompt template for summarization and
+#             a temperature of 0.1 for more deterministic outputs.
+#         """
+#     text = read_file(file, file.name)
+#     prompt = f"Provide a numbered list of questions based on the following document. be very specific and concise. only give the questions based on the question mark. only and only give the questions, no extra text:\n\n{text} \n\n Questions:"
+#     response = chat_with_openai(api_key, chat_model, prompt, 0.1)
+#     if response:
+#         return response
+#     return "Failed to generate questions."
+
+
+def answer_template_questions(api_key: str, chat_model: str, fin_files: List[io.BytesIO], qs_file: io.BytesIO):
+    """
+    Process a list of document files, extracting content, generating summaries, and chunking text.
+
+    Args:
+        api_key (str): The OpenAI API key for embeddings and summarization.
+        chat_model (str): The name of the OpenAI model to use for summarization.
+        fin_files (io.BytesIO): A file-like objects containing the financial documents.
+        qs_files (io.BytesIO): An excel sheet containing the questions list.
+
+    Returns:
+            - A dictionary of document summaries, keyed by filename.
+
+        Note:
+            This function uses a fixed prompt template and
+            a temperature of 0.1 for more deterministic outputs.
+    """
+
+    df_qs = read_file(qs_file, qs_file.name)
+    
+    for file in fin_files:
+        context = read_file(file, file.name)
+        prompt = f"""This is a pandas dataframe:{df_qs} \n\n Each cell that has the question mark 
+        should be replaced with a numerical value. \n\n Search in {context} and find the 
+        numerical values. In the output, only and only give a CSV format table with qustion 
+        marks replaced. Add no extra text. Seperate each row of the table with a new line.
+        If you coul not find the answer, write NA instead of question marks.
+        """
+        response = chat_with_openai(api_key, chat_model, prompt, 0.1)
+        if response:
+            df_qs = response 
+
+    translation_table = str.maketrans('', '', '`"')
+    df_qs = df_qs.translate(translation_table)
+    df_qs = df_qs.replace('csv', '')
+    lines = df_qs.strip().split('\n')
+    with open('answers.csv', 'w', newline='') as file:
+        writer = csv.writer(file)
+        for line in lines:
+            row = line.split(',')
+            row = [None if x.lower()=='none' else x for x in row]
+            writer.writerow(row)
+    
+    return df_qs
+
 
 def get_chat_history(messages: List[Dict[str, str]], memory_size: int) -> str:
     """
@@ -354,7 +438,7 @@ def main():
 
     Note:
         This function serves as the entry point for the Streamlit application and
-        orchestrates the entire SimpleRAG experience.
+        orchestrates the entire FinRAG experience.
     """
     if 'messages' not in st.session_state:
         st.session_state.messages = []
@@ -368,7 +452,7 @@ def main():
         st.session_state.summaries = {}
 
     with st.sidebar:
-        st.title("💬 SimpleRAG")
+        st.title("💬 FinRAG")
         st.header("Settings")
         
         with st.expander("🤖 Model Settings", expanded=False):
@@ -404,7 +488,8 @@ def main():
             memory_size = st.number_input("Number of messages to keep in memory", min_value=1, max_value=10, value=DEFAULT_MEMORY_SIZE, key="memory_size_input")
             prompt_template = st.text_area("Prompt template", value=DEFAULT_PROMPT_TEMPLATE, key="prompt_template_input")
 
-        uploaded_files = st.file_uploader("Choose files", accept_multiple_files=True, key="file_uploader")
+        uploaded_files = st.file_uploader("Choose financial documents", accept_multiple_files=True, key="file_uploader_fin")
+        uploaded_questions = st.file_uploader("Choose question doc", accept_multiple_files=False, key="file_uploader_qs")
         process_button = st.button("🔄 Process Documents", key="process_button")
 
         # Clear chat button in sidebar
@@ -412,7 +497,7 @@ def main():
             st.session_state.messages = []
             st.rerun()
 
-        if process_button and uploaded_files:
+        if process_button and uploaded_files and uploaded_questions:
             if not openai_api_key:
                 st.error("Please enter your OpenAI API key.")
             else:
@@ -425,17 +510,22 @@ def main():
 
                     # Process uploaded documents
                     status_text.text("Reading and chunking documents...")
-                    documents, summaries = process_documents(openai_api_key, st.session_state.selected_chat_model, uploaded_files, chunk_size, chunk_overlap)
+                    with st.empty():
+                        documents, summaries = process_documents(openai_api_key, st.session_state.selected_chat_model, uploaded_files, chunk_size, chunk_overlap)
+                        # questions = process_questions(openai_api_key, st.session_state.selected_chat_model, uploaded_questions)
+                        answers = answer_template_questions(openai_api_key, st.session_state.selected_chat_model, uploaded_files, uploaded_questions)
                     progress_bar.progress(25)
                     
                     # Display processed files
                     st.subheader("Processed Files:")
                     for file in uploaded_files:
                         st.write(file.name)
+                    st.write(uploaded_questions.name)
                     
                     # Embed documents
                     status_text.text("Generating embeddings...")
-                    embeddings = embed_documents(openai_api_key, [doc["content"] for doc in documents], st.session_state.selected_embedding_model)
+                    with st.empty():
+                        embeddings = embed_documents(openai_api_key, [doc["content"] for doc in documents], st.session_state.selected_embedding_model)
                     progress_bar.progress(50)
                     
                     if embeddings:
@@ -462,7 +552,7 @@ def main():
                         collection = chroma_client.create_collection(name=collection_name)
                         
                         # Add documents to ChromaDB
-                        status_text.text("Indexing documents...")
+                        # status_text.text("Indexing documents...")
                         collection.add(
                             embeddings=embeddings,
                             documents=[doc["content"] for doc in documents],
@@ -480,6 +570,7 @@ def main():
                         st.session_state.documents = documents
                         st.session_state.summaries = summaries
                         st.session_state.data_processed = True
+
                     else:
                         status_text.text("Failed to embed documents.")
                         st.error("Failed to embed documents.")
@@ -494,6 +585,8 @@ def main():
 
     # Chat input
     if st.session_state.data_processed:
+        st.write('''Your template question file is filled and saved into the current directory. 
+                 \n Please feel free to ask further questions.''') 
         if prompt := st.chat_input("Ask a question about the documents"):
             # Add user message to chat history
             st.session_state.messages.append({"role": "user", "content": prompt})
