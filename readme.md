@@ -1,0 +1,1 @@
+A simple RAG application for Q and A about companies' financial statements.

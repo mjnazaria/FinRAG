@@ -1,7 +1,5 @@
-# This application is developed by Neo Mohsenvand, starting on Sep 3 2024. Claude Sonnet 3.5 was used to optimize the code. 
 
-
-
+# adopted from NeoVand SimpleRAG application
 
 import streamlit as st
 from streamlit_chat import message

@@ -1,0 +1,9 @@
+chardet==5.2.0
+chromadb==0.5.5
+openai==0.28.0
+openpyxl==3.1.5
+pandas==2.2.3
+PyPDF2==3.0.1
+python_docx==1.1.2
+streamlit==1.37.1
+streamlit_chat==0.1.1
